@@ -1,4 +1,5 @@
 use super::*;
+use crate::ipc::ipc_util::*;
 
 use crate::fs::FileMode;
 use crate::process::{do_getegid, do_geteuid, gid_t, uid_t, ThreadRef};
@@ -10,9 +11,7 @@ use crate::vm::{
 use std::collections::{HashMap, HashSet};
 
 #[allow(non_camel_case_types)]
-pub type key_t = u32;
-pub type ShmId = u32;
-pub type CmdId = u32;
+pub type ShmId = IpcId;
 
 // min shared seg size (bytes)
 const SHMMIN: usize = 1;
@@ -22,13 +21,8 @@ const SHMMAX: usize = (usize::MAX - (1_usize << 24));
 // also indicates the max shmid - 1 in Occlum
 const SHMMNI: ShmId = 4096;
 
-const IPC_PRIVATE: key_t = 0;
-
 // For cmd in shmctl()
-const IPC_RMID: CmdId = 0;
-const IPC_SET: CmdId = 1;
-const IPC_STAT: CmdId = 2;
-const IPC_INFO: CmdId = 3;
+
 const SHM_LOCK: CmdId = 11;
 const SHM_UNLOCK: CmdId = 12;
 const SHM_STAT: CmdId = 13;
@@ -224,53 +218,6 @@ impl Drop for ShmSegment {
     }
 }
 
-#[derive(Debug)]
-struct ShmIdManager {
-    used_id: HashSet<ShmId>,
-    free_num: u32,
-    last_alloc_id: ShmId,
-}
-
-impl ShmIdManager {
-    fn new() -> Self {
-        let used_id = HashSet::new();
-        let free_num = SHMMNI as u32;
-        let last_alloc_id = SHMMNI - 1;
-        ShmIdManager {
-            used_id,
-            free_num,
-            last_alloc_id,
-        }
-    }
-
-    // Always return next free id for shmid
-    fn get_new_shmid(&mut self) -> Result<ShmId> {
-        if self.free_num == 0 {
-            return_errno!(ENOSPC, "all possible shared memory IDs have been taken");
-        } else {
-            self.free_num -= 1;
-        }
-        let mut id = self.last_alloc_id + 1;
-        loop {
-            if id == SHMMNI {
-                id = 0;
-            }
-            if !self.used_id.contains(&id) {
-                break;
-            }
-            id += 1;
-        }
-        self.last_alloc_id = id;
-        Ok(id)
-    }
-
-    fn free_shmid(&mut self, shmid: &ShmId) -> Result<()> {
-        self.free_num += 1;
-        self.used_id.remove(shmid);
-        Ok(())
-    }
-}
-
 lazy_static! {
     pub static ref SYSTEM_V_SHM_MANAGER: ShmManager = ShmManager::new();
 }
@@ -278,14 +225,14 @@ lazy_static! {
 #[derive(Debug)]
 pub struct ShmManager {
     shm_segments: RwLock<HashMap<ShmId, ShmSegment>>,
-    shmid_manager: RwLock<ShmIdManager>,
+    shmid_manager: RwLock<IpcIdManager>,
 }
 
 impl ShmManager {
     fn new() -> Self {
         ShmManager {
             shm_segments: RwLock::new(HashMap::new()),
-            shmid_manager: RwLock::new(ShmIdManager::new()),
+            shmid_manager: RwLock::new(IpcIdManager::new()),
         }
     }
 
@@ -297,20 +244,6 @@ impl ShmManager {
                 shm_segment.chunk().range().contains(addr) && shm_segment.process_set.contains(&pid)
             })
             .map(|(_, shm_segment)| shm_segment.chunk().clone())
-    }
-
-    fn current_time() -> time_t {
-        do_gettimeofday().sec()
-    }
-
-    fn get_new_shmid(&self) -> Result<ShmId> {
-        let mut shmid_manager = self.shmid_manager.write().unwrap();
-        shmid_manager.get_new_shmid()
-    }
-
-    fn free_shmid(&self, shmid: &ShmId) -> Result<()> {
-        let mut shmid_manager = self.shmid_manager.write().unwrap();
-        shmid_manager.free_shmid(&shmid)
     }
 
     fn shmctl_rmshm(&self, shmid: ShmId) -> Result<()> {
@@ -520,5 +453,21 @@ impl ShmManager {
             debug!("clean shm: {:?}", shm);
             self.free_shmid(&shm.shmid);
         }
+    }
+}
+
+impl IpcManagerTrait for ShmManager {
+    fn current_time() -> time_t {
+        do_gettimeofday().sec()
+    }
+
+    fn get_new_ipcid(&self) -> Result<ShmId> {
+        let mut shmid_manager = self.shmid_manager.write().unwrap();
+        shmid_manager.get_new_ipcid()
+    }
+
+    fn free_ipcid(&self, shmid: &ShmId) -> Result<()> {
+        let mut shmid_manager = self.shmid_manager.write().unwrap();
+        shmid_manager.free_ipcid(&shmid)
     }
 }
